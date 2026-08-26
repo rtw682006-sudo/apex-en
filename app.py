@@ -90,6 +90,62 @@ def strip_removed_blocks(html: bytes) -> bytes:
     return html
 
 
+# ------------------------------------------------------------ link previews
+# Chat apps (Telegram, WhatsApp, iMessage...) build their link-preview cards
+# by reading <title> and the og:/twitter: <meta> tags straight out of the raw
+# HTML — they never run translate.js, so those tags were showing the
+# original Russian copy, and with no og:site_name set the preview fell back
+# to a label derived from the onrender.com hostname. This rewrites those
+# tags server-side to English + "APEX" before the page goes out, so shared
+# links preview correctly everywhere.
+OG_TITLE_EN = "APEX — Electronic Head. The New Standard of Clean Heating.".encode("utf-8")
+OG_DESC_EN = ("An electronic head that changes the approach to a familiar "
+              "process by cutting out everything unnecessary.").encode("utf-8")
+OG_SITE_NAME_EN = b"APEX"
+
+
+def _replace_meta_content(html: bytes, prop_names, new_value: bytes) -> bytes:
+    for prop in prop_names:
+        prop_b = re.escape(prop.encode("utf-8"))
+        # property/name comes before content=
+        pattern1 = re.compile(
+            rb'(<meta[^>]*?(?:property|name)=["\']' + prop_b +
+            rb'["\'][^>]*?content=["\'])([^"\']*)(["\'])',
+            re.IGNORECASE,
+        )
+        html = pattern1.sub(lambda m: m.group(1) + new_value + m.group(3), html)
+        # content= comes before property/name (attribute order reversed)
+        pattern2 = re.compile(
+            rb'(<meta[^>]*?content=["\'])([^"\']*)(["\'][^>]*?(?:property|name)=["\']' +
+            prop_b + rb'["\'])',
+            re.IGNORECASE,
+        )
+        html = pattern2.sub(lambda m: m.group(1) + new_value + m.group(3), html)
+    return html
+
+
+def fix_link_preview_meta(html: bytes) -> bytes:
+    html = re.sub(
+        rb'(<title>)(.*?)(</title>)',
+        lambda m: m.group(1) + OG_TITLE_EN + m.group(3),
+        html, count=1, flags=re.IGNORECASE | re.DOTALL,
+    )
+    html = _replace_meta_content(html, ("og:title", "twitter:title"), OG_TITLE_EN)
+    html = _replace_meta_content(
+        html, ("og:description", "twitter:description", "description"), OG_DESC_EN
+    )
+    html = _replace_meta_content(html, ("og:site_name",), OG_SITE_NAME_EN)
+    if b"og:site_name" not in html.lower():
+        low = html.lower()
+        i = low.find(b"<head")
+        if i != -1:
+            j = html.find(b">", i)
+            if j != -1:
+                tag = b'<meta property="og:site_name" content="' + OG_SITE_NAME_EN + b'">'
+                html = html[:j + 1] + tag + html[j + 1:]
+    return html
+
+
 def _ssl_context():
     try:
         import certifi
@@ -152,6 +208,7 @@ def proxy(path):
         data = data.replace(b"https://apexhooka.ru", b"")
         data = data.replace(b"http://apexhooka.ru", b"")
         data = strip_removed_blocks(data)
+        data = fix_link_preview_meta(data)
         low = data.lower()
         i = low.find(b"<head")
         if i != -1:
